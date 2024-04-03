@@ -1,9 +1,17 @@
+using Microsoft.EntityFrameworkCore;
+using URLShortener.Data;
+using URLShortener.Models;
+using URLShortener.Services;
+
 var builder = WebApplication.CreateBuilder(args);
+
 
 // Add services to the container.
 // Learn more about configuring Swagger/OpenAPI at https://aka.ms/aspnetcore/swashbuckle
 builder.Services.AddEndpointsApiExplorer();
 builder.Services.AddSwaggerGen();
+builder.Services.AddDbContext<ApplicationDbContext>(opt => opt.UseInMemoryDatabase("UrlShortener"));
+builder.Services.AddScoped(s => new UrlShorteningService(builder.Services.BuildServiceProvider().GetService<ApplicationDbContext>()));
 
 var app = builder.Build();
 
@@ -16,29 +24,51 @@ if (app.Environment.IsDevelopment())
 
 app.UseHttpsRedirection();
 
-var summaries = new[]
+app.MapPost("shorten", async (
+    ShortenUrlRequest urlRequest,
+    UrlShorteningService urlShorteningService,
+    ApplicationDbContext dbContext,
+    HttpContext httpContext) =>
 {
-    "Freezing", "Bracing", "Chilly", "Cool", "Mild", "Warm", "Balmy", "Hot", "Sweltering", "Scorching"
-};
+    if (!Uri.TryCreate(urlRequest.Url, UriKind.Absolute, out _))
+    {
+        return Results.BadRequest("The specified URL is invalid.");
+    }
 
-app.MapGet("/weatherforecast", () =>
+    var code = await urlShorteningService.GenerateUniqueCode();
+
+    var request = httpContext.Request;
+
+    var shortenedUrl = new ShortenedUrl
+    {
+        Id = Guid.NewGuid(),
+        LongUrl = urlRequest.Url,
+        Code = code,
+        ShortUrl = $"{request.Scheme}://{request.Host}/{code}",
+        CreatedOnUtc = DateTime.UtcNow
+    };
+
+    dbContext.ShortenedUrls.Add(shortenedUrl);
+
+    await dbContext.SaveChangesAsync();
+
+    return Results.Ok(shortenedUrl.ShortUrl);
+});
+
+app.MapGet("{code}", async (string code, ApplicationDbContext dbContext) =>
 {
-    var forecast = Enumerable.Range(1, 5).Select(index =>
-        new WeatherForecast
-        (
-            DateOnly.FromDateTime(DateTime.Now.AddDays(index)),
-            Random.Shared.Next(-20, 55),
-            summaries[Random.Shared.Next(summaries.Length)]
-        ))
-        .ToArray();
-    return forecast;
-})
-.WithName("GetWeatherForecast")
-.WithOpenApi();
+    var shortenedUrl = await dbContext
+        .ShortenedUrls
+        .SingleOrDefaultAsync(s => s.Code == code);
+
+    if (shortenedUrl is null)
+    {
+        return Results.NotFound();
+    }
+
+    return Results.Redirect(shortenedUrl.LongUrl);
+});
 
 app.Run();
 
-internal record WeatherForecast(DateOnly Date, int TemperatureC, string? Summary)
-{
-    public int TemperatureF => 32 + (int)(TemperatureC / 0.5556);
-}
+public record ShortenUrlRequest(string Url);
